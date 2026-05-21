@@ -159,6 +159,7 @@ fn list_sessions(filter_arg: Option<String>) {
         let provider_color = match s.provider.as_str() {
             "Claude" => "\x1b[36m", // Cyan
             "Gemini" => "\x1b[35m", // Purple
+            "Gemini CLI" => "\x1b[95m", // Pinkish Purple
             "Codex" => "\x1b[32m",  // Green
             "Pi" => "\x1b[33m",     // Yellow
             _ => "\x1b[37m",
@@ -230,6 +231,7 @@ fn show_session(session_id: &str) {
     // Scan all paths
     scan_claude(&home, None, &mut all_sessions);
     scan_gemini(&home, None, &mut all_sessions);
+    scan_old_gemini(&home, None, &mut all_sessions);
     scan_codex(&home, None, &mut all_sessions);
     scan_pi(&home, None, &mut all_sessions);
 
@@ -240,6 +242,7 @@ fn show_session(session_id: &str) {
             let provider_color = match s.provider.as_str() {
                 "Claude" => "\x1b[36m",
                 "Gemini" => "\x1b[35m",
+                "Gemini CLI" => "\x1b[95m",
                 "Codex" => "\x1b[32m",
                 "Pi" => "\x1b[33m",
                 _ => "\x1b[37m",
@@ -292,6 +295,7 @@ fn scan_all_sessions(target_cwd: &Path) -> Vec<Session> {
 
     scan_claude(&home, Some(target_cwd), &mut sessions);
     scan_gemini(&home, Some(target_cwd), &mut sessions);
+    scan_old_gemini(&home, Some(target_cwd), &mut sessions);
     scan_codex(&home, Some(target_cwd), &mut sessions);
     scan_pi(&home, Some(target_cwd), &mut sessions);
 
@@ -724,4 +728,112 @@ fn is_same_path(p1: &Path, p2: &Path) -> bool {
     let p1_canon = p1.canonicalize().unwrap_or_else(|_| p1.to_path_buf());
     let p2_canon = p2.canonicalize().unwrap_or_else(|_| p2.to_path_buf());
     p1_canon == p2_canon
+}
+
+fn scan_old_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
+    let gemini_tmp = home.join(".gemini/tmp");
+    if !gemini_tmp.is_dir() {
+        return;
+    }
+
+    for entry in WalkDir::new(gemini_tmp)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.starts_with("session-") {
+                if let Ok(session) = parse_old_gemini_file(path) {
+                    if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                        sessions.push(session);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_old_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    // Get CWD from parent/.project_root
+    let mut cwd = PathBuf::new();
+    if let Some(parent) = path.parent() { // chats
+        if let Some(parent) = parent.parent() { // <workspace_name>
+            let project_root_file = parent.join(".project_root");
+            if project_root_file.is_file() {
+                if let Ok(content) = std::fs::read_to_string(project_root_file) {
+                    cwd = PathBuf::from(content.trim());
+                }
+            }
+        }
+    }
+
+    let session_id = path.file_stem().map_or("unknown", |s| s.to_str().unwrap_or("unknown")).to_string();
+    let mut timestamp = None;
+    let mut touched_files = HashSet::new();
+    let mut commands = Vec::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            // Check startTime, etc.
+            if let Some(ts) = v.get("startTime").and_then(|s| s.as_str()) {
+                timestamp = Some(ts.to_string());
+            }
+            if let Some(ts) = v.get("lastUpdated").and_then(|s| s.as_str()) {
+                timestamp = Some(ts.to_string());
+            }
+            if let Some(ts) = v.get("timestamp").and_then(|s| s.as_str()) {
+                timestamp = Some(ts.to_string());
+            }
+
+            // Extract toolCalls
+            if let Some(tool_calls) = v.get("toolCalls").and_then(|tc| tc.as_array()) {
+                for tool in tool_calls {
+                    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let args = tool.get("args");
+
+                    if args.is_some() {
+                        let args_val = args.unwrap();
+                        match name {
+                            "read_file" | "write_file" | "edit_file" | "replace_file" | "view_file" => {
+                                if let Some(target) = args_val.get("file_path").and_then(|f| f.as_str()) {
+                                    touched_files.insert(clean_path(target, &cwd));
+                                } else if let Some(target) = args_val.get("path").and_then(|f| f.as_str()) {
+                                    touched_files.insert(clean_path(target, &cwd));
+                                }
+                            }
+                            "bash" | "exec_command" | "run_command" => {
+                                if let Some(cmd) = args_val.get("command").and_then(|c| c.as_str()) {
+                                    commands.push(cmd.to_string());
+                                } else if let Some(cmd) = args_val.get("cmd").and_then(|c| c.as_str()) {
+                                    commands.push(cmd.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Session {
+        provider: "Gemini CLI".to_string(),
+        id: session_id,
+        cwd,
+        timestamp,
+        branch: None,
+        touched_files,
+        commands,
+        log_file_path: path.to_path_buf(),
+    })
 }
