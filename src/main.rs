@@ -483,9 +483,29 @@ fn parse_claude_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>>
 }
 
 fn scan_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
-    let gemini_brain = home.join(".gemini/antigravity-cli/brain");
+    let antigravity_dir = home.join(".gemini/antigravity-cli");
+    let gemini_brain = antigravity_dir.join("brain");
     if !gemini_brain.is_dir() {
         return;
+    }
+
+    // Load workspace mapping from history.jsonl
+    let mut history_map = std::collections::HashMap::new();
+    let history_file = antigravity_dir.join("history.jsonl");
+    if history_file.is_file() {
+        if let Ok(file) = File::open(history_file) {
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if let (Some(id), Some(ws)) = (
+                        v.get("conversationId").and_then(|i| i.as_str()),
+                        v.get("workspace").and_then(|w| w.as_str()),
+                    ) {
+                        history_map.insert(id.to_string(), PathBuf::from(ws));
+                    }
+                }
+            }
+        }
     }
 
     for entry in WalkDir::new(gemini_brain)
@@ -495,7 +515,7 @@ fn scan_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Sessio
     {
         let path = entry.path();
         if path.is_file() && path.file_name().map_or(false, |name| name == "transcript.jsonl") {
-            if let Ok(session) = parse_gemini_file(path) {
+            if let Ok(session) = parse_gemini_file(path, &history_map) {
                 if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                     sessions.push(session);
                 }
@@ -504,7 +524,7 @@ fn scan_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Sessio
     }
 }
 
-fn parse_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
+fn parse_gemini_file(path: &Path, history_map: &std::collections::HashMap<String, PathBuf>) -> Result<Session, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -518,7 +538,7 @@ fn parse_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>>
         }
     }
 
-    let mut cwd = PathBuf::new();
+    let mut cwd = history_map.get(&session_id).cloned().unwrap_or_default();
     let mut timestamp = None;
     let mut touched_files = HashSet::new();
     let mut commands = Vec::new();
