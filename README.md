@@ -65,6 +65,11 @@ Show detailed information (including files touched and commands executed) for a 
 sessions show <session_id>
 ```
 
+Include deeply nested subagent sessions in the listing:
+```bash
+sessions --include-subagents
+```
+
 Display help information:
 ```bash
 sessions -h

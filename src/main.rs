@@ -19,13 +19,16 @@ struct Session {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
 
     // Check for help command
     if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
         print_help();
         return;
     }
+
+    let include_subagents = args.contains(&"--include-subagents".to_string());
+    args.retain(|a| a != "--include-subagents");
 
     // Determine subcommands: "list" is default, or "show <session_id>"
     if args.len() > 1 && args[1] == "show" {
@@ -51,7 +54,7 @@ fn main() {
         }
     }
 
-    list_sessions(filter_arg);
+    list_sessions(filter_arg, include_subagents);
 }
 
 fn print_help() {
@@ -73,7 +76,7 @@ fn get_home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/home/hafiz"))
 }
 
-fn list_sessions(filter_arg: Option<String>) {
+fn list_sessions(filter_arg: Option<String>, include_subagents: bool) {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     
     // Parse target directory and file filter from the filter argument
@@ -121,7 +124,7 @@ fn list_sessions(filter_arg: Option<String>) {
     }
     println!();
 
-    let sessions = scan_all_sessions(&target_dir);
+    let sessions = scan_all_sessions(&target_dir, include_subagents);
 
     if sessions.is_empty() {
         println!("No sessions found for this workspace.");
@@ -229,7 +232,7 @@ fn show_session(session_id: &str) {
     let mut all_sessions = Vec::new();
     
     // Scan all paths
-    scan_claude(&home, None, &mut all_sessions);
+    scan_claude(&home, None, &mut all_sessions, true);
     scan_gemini(&home, None, &mut all_sessions);
     scan_old_gemini(&home, None, &mut all_sessions);
     scan_codex(&home, None, &mut all_sessions);
@@ -289,11 +292,11 @@ fn show_session(session_id: &str) {
     }
 }
 
-fn scan_all_sessions(target_cwd: &Path) -> Vec<Session> {
+fn scan_all_sessions(target_cwd: &Path, include_subagents: bool) -> Vec<Session> {
     let home = get_home_dir();
     let mut sessions = Vec::new();
 
-    scan_claude(&home, Some(target_cwd), &mut sessions);
+    scan_claude(&home, Some(target_cwd), &mut sessions, include_subagents);
     scan_gemini(&home, Some(target_cwd), &mut sessions);
     scan_old_gemini(&home, Some(target_cwd), &mut sessions);
     scan_codex(&home, Some(target_cwd), &mut sessions);
@@ -313,21 +316,24 @@ fn clean_path(path_str: &str, cwd: &Path) -> String {
     }
 }
 
-fn scan_claude(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
+fn scan_claude(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>, include_subagents: bool) {
     let claude_projects = home.join(".claude/projects");
     if !claude_projects.is_dir() {
         return;
     }
 
     for entry in WalkDir::new(claude_projects)
-        .max_depth(3)
+        .max_depth(5)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
+        if !include_subagents && path.components().any(|c| c.as_os_str() == "subagents") {
+            continue;
+        }
         if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
             if let Ok(session) = parse_claude_file(path) {
-                if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                     sessions.push(session);
                 }
             }
@@ -417,7 +423,7 @@ fn scan_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Sessio
         let path = entry.path();
         if path.is_file() && path.file_name().map_or(false, |name| name == "transcript.jsonl") {
             if let Ok(session) = parse_gemini_file(path) {
-                if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                     sessions.push(session);
                 }
             }
@@ -531,7 +537,7 @@ fn scan_codex(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session
         let path = entry.path();
         if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
             if let Ok(session) = parse_codex_file(path) {
-                if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                     sessions.push(session);
                 }
             }
@@ -628,14 +634,14 @@ fn scan_pi(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) 
     }
 
     for entry in WalkDir::new(pi_sessions)
-        .max_depth(3)
+        .max_depth(5)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
         if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
             if let Ok(session) = parse_pi_file(path) {
-                if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                     sessions.push(session);
                 }
             }
@@ -721,13 +727,13 @@ fn parse_pi_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
     })
 }
 
-fn is_same_path(p1: &Path, p2: &Path) -> bool {
+fn is_in_workspace(p1: &Path, p2: &Path) -> bool {
     if p1.as_os_str().is_empty() || p2.as_os_str().is_empty() {
         return false;
     }
     let p1_canon = p1.canonicalize().unwrap_or_else(|_| p1.to_path_buf());
     let p2_canon = p2.canonicalize().unwrap_or_else(|_| p2.to_path_buf());
-    p1_canon == p2_canon
+    p1_canon.starts_with(&p2_canon)
 }
 
 fn scan_old_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
@@ -746,7 +752,7 @@ fn scan_old_gemini(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Se
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if file_name.starts_with("session-") {
                 if let Ok(session) = parse_old_gemini_file(path) {
-                    if target_cwd.map_or(true, |target| is_same_path(&session.cwd, target)) {
+                    if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
                         sessions.push(session);
                     }
                 }
