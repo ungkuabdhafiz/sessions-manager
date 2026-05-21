@@ -188,10 +188,10 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
 
     // Print headers
     println!(
-        "\x1b[1m{:<10} {:<38} {:<22} {:<12} {}\x1b[0m",
+        "\x1b[1m{:<16} {:<38} {:<22} {:<12} {}\x1b[0m",
         "Provider", "Session ID", "Last Active", "Branch", "Touched Files"
     );
-    println!("{}", "\x1b[90m-\x1b[0m".repeat(100));
+    println!("{}", "\x1b[90m-\x1b[0m".repeat(106));
 
     for s in &filtered_sessions {
         let provider_color = match s.provider.as_str() {
@@ -239,11 +239,11 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
         };
 
         println!(
-            "{}{:<10}\x1b[0m {:<38} {:<22} {:<12} {}",
+            "{}{:<16}\x1b[0m {:<38} {:<22} {:<12} {}",
             provider_color, s.provider, s.id, clean_time, branch, truncated_files
         );
     }
-    println!("{}", "\x1b[90m-\x1b[0m".repeat(100));
+    println!("{}", "\x1b[90m-\x1b[0m".repeat(106));
     println!("\x1b[90mTotal sessions found: {}\x1b[0m", filtered_sessions.len());
     println!("\x1b[90mRun `sessions show <session_id>` to view full details (files touched, commands run).\x1b[0m");
 }
