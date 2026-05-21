@@ -5,12 +5,13 @@ A lightweight, high-performance command-line interface written in Rust to list, 
 It currently aggregates, parses, and filters session logs for:
 - **Claude CLI**: `~/.claude/projects/`
 - **Gemini / Antigravity CLI**: `~/.gemini/antigravity-cli/brain/`
+- **Old Gemini CLI**: `~/.gemini/tmp/`
 - **Codex**: `~/.codex/sessions/`
 - **Pi**: `~/.pi/agent/sessions/`
 
 ## Features
 
-- **Cross-Provider Aggregation**: Instantly index agent session files across four different platforms.
+- **Cross-Provider Aggregation**: Instantly index agent session files across five different platforms.
 - **Path-Scoped Listing**: Filter sessions to show only those matching the current directory or a specific project workspace.
 - **File Touch Identification**: Find which sessions read, modified, or executed commands on a particular file (e.g., `sessions list main.py`).
 - **Interactive Inspector**: View the chronological history of terminal commands executed and files touched within a specific session using `sessions show <session_id>`.
