@@ -605,7 +605,7 @@ fn parse_gemini_file(path: &Path, history_map: &std::collections::HashMap<String
     }
 
     Ok(Session {
-        provider: "Gemini".to_string(),
+        provider: "Antigravity CLI".to_string(),
         id: session_id,
         cwd,
         timestamp,
