@@ -14,6 +14,7 @@ It currently aggregates, parses, and filters session logs for:
 - **Cross-Provider Aggregation**: Instantly index agent session files across five different platforms.
 - **Path-Scoped Listing**: Filter sessions to show only those matching the current directory or a specific project workspace.
 - **File Touch Identification**: Find which sessions read, modified, or executed commands on a particular file (e.g., `sessions list main.py`).
+- **Session Merging**: Automatically groups resumed sessions (common in Gemini CLI) into a single unified entry with combined history.
 - **Interactive Inspector**: View the chronological history of terminal commands executed and files touched within a specific session using `sessions show <session_id>`.
 - **High Readability**: Bold, color-coded terminal outputs and cleaned, formatted timestamps.
 

@@ -15,7 +15,7 @@ struct Session {
     branch: Option<String>,
     touched_files: HashSet<String>,
     commands: Vec<String>,
-    log_file_path: PathBuf,
+    log_file_paths: Vec<PathBuf>,
 }
 
 fn main() {
@@ -158,11 +158,13 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
     if let Some(ref kw) = keyword_filter {
         let kw_lower = kw.to_lowercase();
         filtered_sessions.retain(|s| {
-            if let Ok(file) = File::open(&s.log_file_path) {
-                let reader = BufReader::new(file);
-                for line in reader.lines().map_while(Result::ok) {
-                    if line.to_lowercase().contains(&kw_lower) {
-                        return true;
+            for log_path in &s.log_file_paths {
+                if let Ok(file) = File::open(log_path) {
+                    let reader = BufReader::new(file);
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.to_lowercase().contains(&kw_lower) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -271,6 +273,7 @@ fn show_session(session_id: &str) {
     scan_codex(&home, None, &mut all_sessions);
     scan_pi(&home, None, &mut all_sessions);
 
+    let all_sessions = merge_sessions(all_sessions);
     let session = all_sessions.into_iter().find(|s| s.id.starts_with(session_id) || session_id.starts_with(&s.id));
 
     match session {
@@ -294,7 +297,10 @@ fn show_session(session_id: &str) {
             if let Some(ref b) = s.branch {
                 println!("\x1b[1mGit Branch:\x1b[0m     {}", b);
             }
-            println!("\x1b[1mLog File:\x1b[0m       {}", s.log_file_path.display());
+            println!("\x1b[1mLog Files ({}):\x1b[0m", s.log_file_paths.len());
+            for path in &s.log_file_paths {
+                println!("                {}", path.display());
+            }
             println!("------------------------------------------------------------------------------------------");
             
             println!("\x1b[1mFILES TOUCHED ({}):\x1b[0m", s.touched_files.len());
@@ -335,7 +341,41 @@ fn scan_all_sessions(target_cwd: &Path, include_subagents: bool) -> Vec<Session>
     scan_codex(&home, Some(target_cwd), &mut sessions);
     scan_pi(&home, Some(target_cwd), &mut sessions);
 
-    sessions
+    merge_sessions(sessions)
+}
+
+fn merge_sessions(sessions: Vec<Session>) -> Vec<Session> {
+    use std::collections::HashMap;
+    let mut merged: HashMap<(String, String), Session> = HashMap::new();
+
+    for s in sessions {
+        let key = (s.provider.clone(), s.id.clone());
+        if let Some(existing) = merged.get_mut(&key) {
+            // Update timestamp if newer
+            if let Some(ts) = &s.timestamp {
+                if existing.timestamp.is_none() || ts > existing.timestamp.as_ref().unwrap() {
+                    existing.timestamp = Some(ts.clone());
+                }
+            }
+            // Combine files and commands
+            existing.touched_files.extend(s.touched_files);
+            existing.commands.extend(s.commands);
+            // Combine log files
+            existing.log_file_paths.extend(s.log_file_paths);
+            
+            // Re-sort and deduplicate log files
+            existing.log_file_paths.sort();
+            existing.log_file_paths.dedup();
+            
+            // Deduplicate commands
+            let mut unique_cmds = HashSet::new();
+            existing.commands.retain(|c| unique_cmds.insert(c.clone()));
+        } else {
+            merged.insert(key, s);
+        }
+    }
+
+    merged.into_values().collect()
 }
 
 // Canonicalize paths inside parsed session
@@ -438,7 +478,7 @@ fn parse_claude_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>>
         branch,
         touched_files,
         commands,
-        log_file_path: path.to_path_buf(),
+        log_file_paths: vec![path.to_path_buf()],
     })
 }
 
@@ -552,7 +592,7 @@ fn parse_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>>
         branch: None, // Gemini logs don't directly record the branch in metadata
         touched_files,
         commands,
-        log_file_path: path.to_path_buf(),
+        log_file_paths: vec![path.to_path_buf()],
     })
 }
 
@@ -656,7 +696,7 @@ fn parse_codex_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> 
         branch,
         touched_files,
         commands,
-        log_file_path: path.to_path_buf(),
+        log_file_paths: vec![path.to_path_buf()],
     })
 }
 
@@ -756,7 +796,7 @@ fn parse_pi_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
         branch: None,
         touched_files,
         commands,
-        log_file_path: path.to_path_buf(),
+        log_file_paths: vec![path.to_path_buf()],
     })
 }
 
@@ -811,7 +851,7 @@ fn parse_old_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Err
         }
     }
 
-    let session_id = path.file_stem().map_or("unknown", |s| s.to_str().unwrap_or("unknown")).to_string();
+    let mut session_id = path.file_stem().map_or("unknown", |s| s.to_str().unwrap_or("unknown")).to_string();
     let mut timestamp = None;
     let mut touched_files = HashSet::new();
     let mut commands = Vec::new();
@@ -823,6 +863,10 @@ fn parse_old_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Err
         };
 
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            // Check sessionId
+            if let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) {
+                session_id = id.to_string();
+            }
             // Check startTime, etc.
             if let Some(ts) = v.get("startTime").and_then(|s| s.as_str()) {
                 timestamp = Some(ts.to_string());
@@ -873,6 +917,6 @@ fn parse_old_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Err
         branch: None,
         touched_files,
         commands,
-        log_file_path: path.to_path_buf(),
+        log_file_paths: vec![path.to_path_buf()],
     })
 }
