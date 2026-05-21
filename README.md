@@ -61,6 +61,11 @@ Find sessions in the current directory that touched a specific file:
 sessions main.rs
 ```
 
+List all known workspace paths across all providers (including deleted/renamed folders):
+```bash
+sessions paths
+```
+
 Show detailed information (including files touched and commands executed) for a specific session:
 ```bash
 sessions show <session_id>

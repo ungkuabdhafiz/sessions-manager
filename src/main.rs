@@ -40,6 +40,11 @@ fn main() {
     }
 
     // Determine subcommands: "list" is default, or "show <session_id>"
+    if args.len() > 1 && args[1] == "paths" {
+        list_paths(include_subagents);
+        return;
+    }
+
     if args.len() > 1 && args[1] == "show" {
         if args.len() < 3 {
             eprintln!("Error: Please provide a session ID to show. Run `sessions show <session_id>`");
@@ -75,6 +80,7 @@ fn print_help() {
     println!("  sessions <dir>               List sessions for the specified directory");
     println!("  sessions <file>              List sessions in current directory that touched <file>");
     println!("  sessions list <file/dir>     Explicit form of the list command");
+    println!("  sessions paths               List all available workspace paths");
     println!("  sessions show <session_id>   Show detailed information for a specific session");
     println!("  sessions -h, --help          Print this help message");
 }
@@ -94,35 +100,34 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
 
     if let Some(ref arg) = filter_arg {
         let path = Path::new(arg);
-        if path.is_dir() {
-            if let Ok(abs_dir) = path.canonicalize() {
-                target_dir = abs_dir;
-            } else {
-                target_dir = path.to_path_buf();
-            }
-        } else if path.is_file() {
-            if let Ok(abs_file) = path.canonicalize() {
-                if let Some(parent) = abs_file.parent() {
-                    target_dir = parent.to_path_buf();
-                }
-                file_filter = abs_file.file_name().map(|n| n.to_string_lossy().to_string());
-            } else {
-                file_filter = Some(arg.clone());
-            }
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
         } else {
-            // Check if it's a relative file that doesn't exist yet but has a parent
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() && parent.is_dir() {
-                    if let Ok(abs_parent) = parent.canonicalize() {
-                        target_dir = abs_parent;
-                    }
-                }
+            current_dir.join(path)
+        };
+
+        if abs_path.is_dir() {
+            target_dir = abs_path.canonicalize().unwrap_or(abs_path);
+        } else if abs_path.is_file() {
+            let canon = abs_path.canonicalize().unwrap_or(abs_path);
+            if let Some(p) = canon.parent() {
+                target_dir = p.to_path_buf();
             }
-            file_filter = Some(path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy().to_string());
+            file_filter = canon.file_name().map(|n| n.to_string_lossy().to_string());
+        } else {
+            // Path doesnt exist. Heuristic: if it has an extension, treat as file filter.
+            if path.extension().is_some() {
+                if let Some(p) = abs_path.parent() {
+                    target_dir = p.to_path_buf();
+                }
+                file_filter = abs_path.file_name().map(|n| n.to_string_lossy().to_string());
+            } else {
+                target_dir = abs_path;
+            }
         }
     }
 
-    // Canonicalize target_dir for robust comparison
+    // Canonicalize target_dir for robust comparison if it exists
     if let Ok(abs_dir) = target_dir.canonicalize() {
         target_dir = abs_dir;
     }
@@ -136,7 +141,7 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
     }
     println!();
 
-    let sessions = scan_all_sessions(&target_dir, include_subagents);
+    let sessions = scan_all_sessions(Some(&target_dir), include_subagents);
 
     if sessions.is_empty() {
         println!("No sessions found for this workspace.");
@@ -263,17 +268,7 @@ fn show_session(session_id: &str) {
     println!();
 
     // We scan all sessions globally (without filtering by cwd) to find the ID
-    let home = get_home_dir();
-    let mut all_sessions = Vec::new();
-    
-    // Scan all paths
-    scan_claude(&home, None, &mut all_sessions, true);
-    scan_gemini(&home, None, &mut all_sessions);
-    scan_old_gemini(&home, None, &mut all_sessions);
-    scan_codex(&home, None, &mut all_sessions);
-    scan_pi(&home, None, &mut all_sessions);
-
-    let all_sessions = merge_sessions(all_sessions);
+    let all_sessions = scan_all_sessions(None, true);
     let session = all_sessions.into_iter().find(|s| s.id.starts_with(session_id) || session_id.starts_with(&s.id));
 
     match session {
@@ -331,15 +326,15 @@ fn show_session(session_id: &str) {
     }
 }
 
-fn scan_all_sessions(target_cwd: &Path, include_subagents: bool) -> Vec<Session> {
+fn scan_all_sessions(target_cwd: Option<&Path>, include_subagents: bool) -> Vec<Session> {
     let home = get_home_dir();
     let mut sessions = Vec::new();
 
-    scan_claude(&home, Some(target_cwd), &mut sessions, include_subagents);
-    scan_gemini(&home, Some(target_cwd), &mut sessions);
-    scan_old_gemini(&home, Some(target_cwd), &mut sessions);
-    scan_codex(&home, Some(target_cwd), &mut sessions);
-    scan_pi(&home, Some(target_cwd), &mut sessions);
+    scan_claude(&home, target_cwd, &mut sessions, include_subagents);
+    scan_gemini(&home, target_cwd, &mut sessions);
+    scan_old_gemini(&home, target_cwd, &mut sessions);
+    scan_codex(&home, target_cwd, &mut sessions);
+    scan_pi(&home, target_cwd, &mut sessions);
 
     merge_sessions(sessions)
 }
@@ -939,4 +934,29 @@ fn parse_old_gemini_file(path: &Path) -> Result<Session, Box<dyn std::error::Err
         commands,
         log_file_paths: vec![path.to_path_buf()],
     })
+}
+
+
+fn list_paths(include_subagents: bool) {
+    println!("\x1b[90mScanning all providers for available workspaces...\x1b[0m\n");
+    let sessions = scan_all_sessions(None, include_subagents);
+    let mut paths: Vec<String> = sessions.into_iter().map(|s| s.cwd.to_string_lossy().to_string()).collect();
+    paths.sort();
+    paths.dedup();
+
+    if paths.is_empty() {
+        println!("No workspaces found.");
+        return;
+    }
+
+    println!("\x1b[1mAvailable Workspaces ({}):\x1b[0m", paths.len());
+    println!("{}", "\x1b[90m-\x1b[0m".repeat(106));
+    for p in paths {
+        if Path::new(&p).exists() {
+            println!("  \x1b[32m{}\x1b[0m", p);
+        } else {
+            println!("  \x1b[31m{} (deleted/renamed)\x1b[0m", p);
+        }
+    }
+    println!("{}", "\x1b[90m-\x1b[0m".repeat(106));
 }
