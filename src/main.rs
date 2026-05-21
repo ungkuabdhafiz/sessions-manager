@@ -30,6 +30,15 @@ fn main() {
     let include_subagents = args.contains(&"--include-subagents".to_string());
     args.retain(|a| a != "--include-subagents");
 
+    let mut keyword_filter = None;
+    if let Some(idx) = args.iter().position(|a| a == "--keyword") {
+        if idx + 1 < args.len() {
+            keyword_filter = Some(args[idx + 1].clone());
+            args.remove(idx + 1);
+        }
+        args.remove(idx);
+    }
+
     // Determine subcommands: "list" is default, or "show <session_id>"
     if args.len() > 1 && args[1] == "show" {
         if args.len() < 3 {
@@ -54,7 +63,7 @@ fn main() {
         }
     }
 
-    list_sessions(filter_arg, include_subagents);
+    list_sessions(filter_arg, include_subagents, keyword_filter);
 }
 
 fn print_help() {
@@ -76,7 +85,7 @@ fn get_home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/home/hafiz"))
 }
 
-fn list_sessions(filter_arg: Option<String>, include_subagents: bool) {
+fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_filter: Option<String>) {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     
     // Parse target directory and file filter from the filter argument
@@ -122,6 +131,9 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool) {
     if let Some(ref f) = file_filter {
         println!("\x1b[90mFiltering for sessions touching file: \x1b[32m\x1b[1m{}\x1b[0m", f);
     }
+    if let Some(ref k) = keyword_filter {
+        println!("\x1b[90mFiltering for sessions containing keyword: \x1b[33m\x1b[1m{}\x1b[0m", k);
+    }
     println!();
 
     let sessions = scan_all_sessions(&target_dir, include_subagents);
@@ -143,8 +155,29 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool) {
             .collect();
     }
 
+    if let Some(ref kw) = keyword_filter {
+        let kw_lower = kw.to_lowercase();
+        filtered_sessions.retain(|s| {
+            if let Ok(file) = File::open(&s.log_file_path) {
+                let reader = BufReader::new(file);
+                for line in reader.lines().map_while(Result::ok) {
+                    if line.to_lowercase().contains(&kw_lower) {
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+    }
+
     if filtered_sessions.is_empty() {
-        println!("No sessions matched the file filter '{}'.", file_filter.unwrap());
+        if let Some(ref f) = file_filter {
+            println!("No sessions matched the file filter '{}'.", f);
+        } else if let Some(ref k) = keyword_filter {
+            println!("No sessions matched the keyword filter '{}'.", k);
+        } else {
+            println!("No sessions matched the provided filters.");
+        }
         return;
     }
 

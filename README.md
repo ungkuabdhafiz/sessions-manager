@@ -70,6 +70,11 @@ Include deeply nested subagent sessions in the listing:
 sessions --include-subagents
 ```
 
+Filter sessions containing a specific keyword anywhere in their history:
+```bash
+sessions --keyword "docker-compose"
+```
+
 Display help information:
 ```bash
 sessions -h
