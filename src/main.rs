@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use chrono::Utc;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -204,7 +205,8 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
             "Gemini" => "\x1b[35m", // Purple
             "Gemini CLI" => "\x1b[95m", // Pinkish Purple
             "Codex" => "\x1b[32m",  // Green
-            "Pi" => "\x1b[33m",     // Yellow
+            "Pi" => "\x1b[33m",
+            "Cursor" => "\x1b[34m",     // Yellow
             _ => "\x1b[37m",
         };
 
@@ -279,6 +281,7 @@ fn show_session(session_id: &str) {
                 "Gemini CLI" => "\x1b[95m",
                 "Codex" => "\x1b[32m",
                 "Pi" => "\x1b[33m",
+            "Cursor" => "\x1b[34m",
                 _ => "\x1b[37m",
             };
 
@@ -335,6 +338,7 @@ fn scan_all_sessions(target_cwd: Option<&Path>, include_subagents: bool) -> Vec<
     scan_old_gemini(&home, target_cwd, &mut sessions);
     scan_codex(&home, target_cwd, &mut sessions);
     scan_pi(&home, target_cwd, &mut sessions);
+    scan_cursor(&home, target_cwd, &mut sessions);
 
     merge_sessions(sessions)
 }
@@ -959,4 +963,96 @@ fn list_paths(include_subagents: bool) {
         }
     }
     println!("{}", "\x1b[90m-\x1b[0m".repeat(106));
+}
+fn scan_cursor(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
+    let cursor_projects = home.join(".cursor/projects");
+    if !cursor_projects.is_dir() {
+        return;
+    }
+
+    for entry in WalkDir::new(cursor_projects)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "jsonl") {
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if file_name.len() > 30 { // Likely a UUID.jsonl
+                if let Ok(session) = parse_cursor_file(path) {
+                    if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
+                        sessions.push(session);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_cursor_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let mtime = metadata.modified()?;
+    let timestamp: DateTime<Utc> = mtime.into();
+    let timestamp_str = timestamp.to_rfc3339();
+
+    let reader = BufReader::new(file);
+
+    let session_id = path.file_stem().map_or("unknown", |s| s.to_str().unwrap_or("unknown")).to_string();
+    
+    let mut cwd = PathBuf::new();
+    let mut touched_files = HashSet::new();
+    let mut commands = Vec::new();
+
+    for line in reader.lines().map_while(Result::ok) {
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            if let Some(message) = v.get("message") {
+                if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = block.get("input");
+                            
+                            if let Some(input) = input {
+                                match name {
+                                    "Read" | "View" | "Edit" => {
+                                        if let Some(p) = input.get("path").and_then(|p| p.as_str()) {
+                                            touched_files.insert(p.to_string());
+                                            if cwd.as_os_str().is_empty() {
+                                                if let Some(parent) = Path::new(p).parent() {
+                                                    cwd = parent.to_path_buf();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "Glob" | "Search" => {
+                                        if let Some(target) = input.get("target_directory").and_then(|t| t.as_str()) {
+                                            cwd = PathBuf::from(target);
+                                        }
+                                    }
+                                    "Bash" | "Terminal" => {
+                                        if let Some(cmd) = input.get("command").and_then(|c| c.as_str()) {
+                                            commands.push(cmd.to_string());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Session {
+        provider: "Cursor".to_string(),
+        id: session_id,
+        cwd,
+        timestamp: Some(timestamp_str),
+        branch: None,
+        touched_files,
+        commands,
+        log_file_paths: vec![path.to_path_buf()],
+    })
 }

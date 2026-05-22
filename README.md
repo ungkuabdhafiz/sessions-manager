@@ -7,7 +7,7 @@ It currently aggregates, parses, and filters session logs for:
 - **Gemini / Antigravity CLI**: `~/.gemini/antigravity-cli/brain/`
 - **Old Gemini CLI**: `~/.gemini/tmp/`
 - **Codex**: `~/.codex/sessions/`
-- **Pi**: `~/.pi/agent/sessions/`
+- **Pi**: `~/.pi/agent/sessions/`\n- **Cursor**: `~/.cursor/projects/`
 
 ## Features
 
