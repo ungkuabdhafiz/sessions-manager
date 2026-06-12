@@ -8,10 +8,12 @@ It currently aggregates, parses, and filters session logs for:
 - **Old Gemini CLI**: `~/.gemini/tmp/`
 - **Codex**: `~/.codex/sessions/`
 - **Pi**: `~/.pi/agent/sessions/`\n- **Cursor**: `~/.cursor/projects/`
+- **CommandCode**: `~/.commandcode/projects/`
+- **Reasonix**: `~/.reasonix/sessions/` (legacy) and `~/.config/reasonix/sessions/` (current)
 
 ## Features
 
-- **Cross-Provider Aggregation**: Instantly index agent session files across five different platforms.
+- **Cross-Provider Aggregation**: Instantly index agent session files across eight different platforms.
 - **Path-Scoped Listing**: Filter sessions to show only those matching the current directory or a specific project workspace (including robust CWD mapping for Antigravity CLI via `history.jsonl`).
 - **File Touch Identification**: Find which sessions read, modified, or executed commands on a particular file (e.g., `sessions list main.py`).
 - **Session Merging**: Automatically groups resumed sessions (common in Gemini CLI) into a single unified entry with combined history.
