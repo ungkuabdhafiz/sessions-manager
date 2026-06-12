@@ -74,7 +74,7 @@ fn main() {
 
 fn print_help() {
     println!("\x1b[1mSessions Manager CLI\x1b[0m");
-    println!("A tool to list and inspect AI sessions across providers (Claude, Gemini, Codex, Pi, Cursor, CommandCode).");
+    println!("A tool to list and inspect AI sessions across providers (Claude, Gemini, Codex, Pi, Cursor, CommandCode, Reasonix).");
     println!();
     println!("\x1b[1mUSAGE:\x1b[0m");
     println!("  sessions                     List sessions for the current directory");
@@ -208,6 +208,7 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
             "Pi" => "\x1b[33m",
             "Cursor" => "\x1b[34m",
             "CommandCode" => "\x1b[92m", // Bright green
+            "Reasonix" => "\x1b[93m",   // Bright yellow
             _ => "\x1b[37m",
         };
 
@@ -284,6 +285,7 @@ fn show_session(session_id: &str) {
                 "Pi" => "\x1b[33m",
             "Cursor" => "\x1b[34m",
             "CommandCode" => "\x1b[92m",
+            "Reasonix" => "\x1b[93m",
                 _ => "\x1b[37m",
             };
 
@@ -342,6 +344,7 @@ fn scan_all_sessions(target_cwd: Option<&Path>, include_subagents: bool) -> Vec<
     scan_pi(&home, target_cwd, &mut sessions);
     scan_cursor(&home, target_cwd, &mut sessions);
     scan_commandcode(&home, target_cwd, &mut sessions);
+    scan_reasonix(&home, target_cwd, &mut sessions);
 
     merge_sessions(sessions)
 }
@@ -1078,6 +1081,286 @@ fn parse_commandcode_file(path: &Path) -> Result<Session, Box<dyn std::error::Er
 
     Ok(Session {
         provider: "CommandCode".to_string(),
+        id: session_id,
+        cwd,
+        timestamp,
+        branch,
+        touched_files,
+        commands,
+        log_file_paths: vec![path.to_path_buf()],
+    })
+}
+
+fn scan_reasonix(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
+    // Reasonix stores sessions in two locations:
+    //   Legacy:  ~/.reasonix/sessions/
+    //   Current: ~/.config/reasonix/sessions/
+    let dirs = [
+        home.join(".reasonix/sessions"),
+        home.join(".config/reasonix/sessions"),
+    ];
+
+    for dir in &dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+
+        for entry in WalkDir::new(dir)
+            .max_depth(3)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if !path.is_file() || !path.extension().map_or(false, |ext| ext == "jsonl") {
+                continue;
+            }
+            // Skip backup files
+            if path.to_string_lossy().ends_with(".bak") {
+                continue;
+            }
+            // Skip event log files (not conversation transcripts)
+            if path.to_string_lossy().contains(".events.") {
+                continue;
+            }
+            if let Ok(session) = parse_reasonix_file(path) {
+                if target_cwd.map_or(true, |target| is_in_workspace(&session.cwd, target)) {
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+}
+
+fn parse_reasonix_file(path: &Path) -> Result<Session, Box<dyn std::error::Error>> {
+    // --- Read companion metadata file ---
+    // Legacy format:  ~/.reasonix/sessions/<name>.meta.json   (has workspace, branch, summary)
+    // Current format: ~/.config/reasonix/sessions/<name>.jsonl.meta  (has id, created_at, updated_at)
+    let meta_path_legacy = path.with_extension("meta.json");
+    let meta_path_current = PathBuf::from(format!("{}.meta", path.display()));
+
+    let (meta_legacy, meta_current) = (
+        if meta_path_legacy.is_file() {
+            std::fs::read_to_string(&meta_path_legacy)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+        if meta_path_current.is_file() {
+            std::fs::read_to_string(&meta_path_current)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+    );
+
+    // Session ID: current meta "id" field, fallback to filename stem
+    let session_id = meta_current
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .map_or("unknown", |s| s.to_str().unwrap_or("unknown"))
+                .to_string()
+        });
+
+    // CWD: from legacy meta "workspace" field, or from checkpoint files
+    let mut cwd = meta_legacy
+        .get("workspace")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_default();
+
+    // For newer Reasonix sessions, CWD is in checkpoint files
+    if cwd.as_os_str().is_empty() {
+        let ckpt_path = path.to_string_lossy().replace(".jsonl", ".ckpt");
+        let ckpt_dir = PathBuf::from(&ckpt_path);
+        if ckpt_dir.is_dir() {
+            // Try turn-0.json first (the initial state before any tool calls)
+            let ckpt_file = ckpt_dir.join("turn-0.json");
+            if let Ok(content) = std::fs::read_to_string(&ckpt_file) {
+                if let Ok(ckpt) = serde_json::from_str::<Value>(&content) {
+                    if let Some(files) = ckpt.get("files").and_then(|f| f.as_array()) {
+                        for f in files {
+                            if let Some(abs_path) = f.get("path").and_then(|p| p.as_str()) {
+                                if abs_path.starts_with('/') {
+                                    if let Some(parent) = Path::new(abs_path).parent() {
+                                        cwd = parent.to_path_buf();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Timestamp: prefer current meta "updated_at" then "created_at"
+    let mut timestamp = meta_current
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            meta_current
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    // Branch: from legacy meta "branch" field
+    let mut branch = meta_legacy
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // --- Parse the JSONL conversation transcript ---
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut touched_files = HashSet::new();
+    let mut commands = Vec::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+            // Fallback timestamp from any line that has one
+            if timestamp.is_none() {
+                if let Some(ts) = v.get("ts").and_then(|t| t.as_str()) {
+                    timestamp = Some(ts.to_string());
+                }
+            }
+
+            // Extract CWD from system prompt if not yet known
+            // Pattern: workdir=/some/path  OR  "cwd":"<path>"
+            if cwd.as_os_str().is_empty() && role == "system" {
+                if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                    // Try: workdir=/path
+                    if let Some(idx) = content.find("workdir=") {
+                        let rest = &content[idx + 8..];
+                        let end = rest.find(|c: char| c.is_whitespace() || c == '"').unwrap_or(rest.len());
+                        if end > 0 {
+                            cwd = PathBuf::from(&rest[..end]);
+                        }
+                    }
+                    // Try: "cwd":"<path>"
+                    if cwd.as_os_str().is_empty() {
+                        if let Some(idx) = content.find("\"cwd\":\"") {
+                            let rest = &content[idx + 7..];
+                            if let Some(end) = rest.find('"') {
+                                cwd = PathBuf::from(&rest[..end]);
+                            }
+                        }
+                    }
+                    // Try: extract workspace from memory file path pattern
+                    // e.g. "...the project's AGENTS.md:\n- <repo>/.reasonix/skills/..."
+                    if cwd.as_os_str().is_empty() {
+                        if let Some(idx) = content.find("/AGENTS.md") {
+                            // Walk backwards from the path to find the start
+                            let before = &content[..idx];
+                            if let Some(start) = before.rfind('\n') {
+                                let candidate = before[start + 1..].trim();
+                                // Could be "- <repo>/.reasonix/skills/" — extract the path part
+                                if candidate.starts_with('/') || candidate.starts_with("~/") {
+                                    // Take up to first space or end
+                                    let end = candidate.find(' ').unwrap_or(candidate.len());
+                                    let path_part = &candidate[..end];
+                                    // Remove trailing "/.reasonix" or similar suffix
+                                    if let Some(reasonix_idx) = path_part.find("/.reasonix") {
+                                        cwd = PathBuf::from(&path_part[..reasonix_idx]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Tool calls are in assistant messages under "tool_calls" array
+            // Format varies:
+            //   Wrapped:   {"function":{"name":"bash","arguments":"..."}}
+            //   Unwrapped: {"name":"bash","arguments":"..."}
+            if role == "assistant" {
+                if let Some(tool_calls) = v.get("tool_calls").and_then(|tc| tc.as_array()) {
+                    for tc in tool_calls {
+                        // Support both wrapped (function.name) and unwrapped (name) formats
+                        let name = tc.get("function")
+                            .and_then(|f| f.get("name"))
+                            .or_else(|| tc.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("");
+
+                        let args_str = tc.get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .or_else(|| tc.get("arguments"))
+                            .and_then(|a| a.as_str());
+
+                        let args_val = args_str
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+
+                        if let Some(args) = args_val {
+                            // Last-resort CWD: use first absolute path from tool args
+                            if cwd.as_os_str().is_empty() {
+                                for key in &["path", "file", "file_path", "absolutePath", "directory"] {
+                                    if let Some(p) = args.get(*key).and_then(|p| p.as_str()) {
+                                        if p.starts_with('/') {
+                                            if let Some(parent) = Path::new(p).parent() {
+                                                cwd = parent.to_path_buf();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            match name {
+                                "read_file" | "write_file" | "edit_file"
+                                | "delete_range" | "delete_symbol" => {
+                                    if let Some(p) = args.get("path").and_then(|p| p.as_str()) {
+                                        touched_files.insert(clean_path(p, &cwd));
+                                    }
+                                }
+                                "multi_edit" => {
+                                    if let Some(p) = args.get("path").and_then(|p| p.as_str()) {
+                                        touched_files.insert(clean_path(p, &cwd));
+                                    }
+                                }
+                                "grep" => {
+                                    if let Some(p) = args.get("path").and_then(|p| p.as_str()) {
+                                        touched_files.insert(clean_path(p, &cwd));
+                                    }
+                                }
+                                "lsp_definition" | "lsp_hover" | "lsp_references" | "lsp_diagnostics" => {
+                                    if let Some(p) = args.get("file").and_then(|p| p.as_str()) {
+                                        touched_files.insert(clean_path(p, &cwd));
+                                    }
+                                }
+                                "bash" => {
+                                    if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                                        commands.push(cmd.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Session {
+        provider: "Reasonix".to_string(),
         id: session_id,
         cwd,
         timestamp,
