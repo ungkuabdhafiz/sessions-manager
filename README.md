@@ -10,10 +10,11 @@ It currently aggregates, parses, and filters session logs for:
 - **Pi**: `~/.pi/agent/sessions/`\n- **Cursor**: `~/.cursor/projects/`
 - **CommandCode**: `~/.commandcode/projects/`
 - **Reasonix**: `~/.reasonix/sessions/` (legacy) and `~/.config/reasonix/sessions/` (current)
+- **Mimocode**: `~/.local/share/mimocode/mimocode.db` (SQLite database)
 
 ## Features
 
-- **Cross-Provider Aggregation**: Instantly index agent session files across eight different platforms.
+- **Cross-Provider Aggregation**: Instantly index agent session files across nine different platforms.
 - **Path-Scoped Listing**: Filter sessions to show only those matching the current directory or a specific project workspace (including robust CWD mapping for Antigravity CLI via `history.jsonl`).
 - **File Touch Identification**: Find which sessions read, modified, or executed commands on a particular file (e.g., `sessions list main.py`).
 - **Session Merging**: Automatically groups resumed sessions (common in Gemini CLI) into a single unified entry with combined history.

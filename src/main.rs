@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use chrono::DateTime;
 use serde_json::Value;
 use walkdir::WalkDir;
+use rusqlite::Connection;
 
 #[derive(Debug, Clone)]
 struct Session {
@@ -74,7 +75,7 @@ fn main() {
 
 fn print_help() {
     println!("\x1b[1mSessions Manager CLI\x1b[0m");
-    println!("A tool to list and inspect AI sessions across providers (Claude, Gemini, Codex, Pi, Cursor, CommandCode, Reasonix).");
+    println!("A tool to list and inspect AI sessions across providers (Claude, Gemini, Codex, Pi, Cursor, CommandCode, Reasonix, Mimocode).");
     println!();
     println!("\x1b[1mUSAGE:\x1b[0m");
     println!("  sessions                     List sessions for the current directory");
@@ -209,6 +210,7 @@ fn list_sessions(filter_arg: Option<String>, include_subagents: bool, keyword_fi
             "Cursor" => "\x1b[34m",
             "CommandCode" => "\x1b[92m", // Bright green
             "Reasonix" => "\x1b[93m",   // Bright yellow
+            "Mimocode" => "\x1b[96m",  // Bright Cyan
             _ => "\x1b[37m",
         };
 
@@ -283,9 +285,10 @@ fn show_session(session_id: &str) {
                 "Gemini CLI" => "\x1b[95m",
                 "Codex" => "\x1b[32m",
                 "Pi" => "\x1b[33m",
-            "Cursor" => "\x1b[34m",
-            "CommandCode" => "\x1b[92m",
-            "Reasonix" => "\x1b[93m",
+                "Cursor" => "\x1b[34m",
+                "CommandCode" => "\x1b[92m",
+                "Reasonix" => "\x1b[93m",
+                "Mimocode" => "\x1b[96m",
                 _ => "\x1b[37m",
             };
 
@@ -345,6 +348,7 @@ fn scan_all_sessions(target_cwd: Option<&Path>, include_subagents: bool) -> Vec<
     scan_cursor(&home, target_cwd, &mut sessions);
     scan_commandcode(&home, target_cwd, &mut sessions);
     scan_reasonix(&home, target_cwd, &mut sessions);
+    scan_mimocode(&home, target_cwd, &mut sessions);
 
     merge_sessions(sessions)
 }
@@ -1369,6 +1373,131 @@ fn parse_reasonix_file(path: &Path) -> Result<Session, Box<dyn std::error::Error
         commands,
         log_file_paths: vec![path.to_path_buf()],
     })
+}
+
+fn scan_mimocode(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
+    let db_path = home.join(".local/share/mimocode/mimocode.db");
+    if !db_path.is_file() {
+        return;
+    }
+
+    let conn = match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT s.id, s.title, s.directory, s.time_created,
+                COALESCE(p.worktree, s.directory) as cwd
+         FROM session s
+         LEFT JOIN project p ON s.project_id = p.id"
+    ) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let _title: String = row.get(1)?;
+        let directory: String = row.get(2)?;
+        let time_created: i64 = row.get(3)?;
+        let cwd: String = row.get(4)?;
+        Ok((id, directory, time_created, cwd))
+    });
+
+    let rows = match rows {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    for row in rows {
+        let (session_id, _directory, time_created, cwd_str) = match row {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let cwd = PathBuf::from(&cwd_str);
+
+        if let Some(target) = target_cwd {
+            if !is_in_workspace(&cwd, target) {
+                continue;
+            }
+        }
+
+        let timestamp = {
+            let secs = time_created / 1000;
+            let nanos = ((time_created % 1000) * 1_000_000) as u32;
+            DateTime::from_timestamp(secs, nanos)
+                .map(|dt| dt.to_rfc3339())
+        };
+
+        let mut touched_files = HashSet::new();
+        let mut commands = Vec::new();
+
+        let mut fts_stmt = match conn.prepare(
+            "SELECT tool_name, body FROM history_fts WHERE session_id = ?1 AND kind = 'tool_input'"
+        ) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let fts_rows = fts_stmt.query_map(rusqlite::params![session_id], |row| {
+            let tool_name: Option<String> = row.get(0)?;
+            let body: String = row.get(1)?;
+            Ok((tool_name, body))
+        });
+
+        if let Ok(fts_rows) = fts_rows {
+            for fts_row in fts_rows {
+                let (tool_name_opt, body) = match fts_row {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                let tool_name = tool_name_opt.unwrap_or_default();
+                let tool_lower = tool_name.to_lowercase();
+
+                // Body format: "ToolName {json_args}" — strip the tool name prefix
+                let json_str = if let Some(idx) = body.find('{') {
+                    &body[idx..]
+                } else {
+                    continue;
+                };
+
+                let args: Value = match serde_json::from_str(json_str) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match tool_lower.as_str() {
+                    "bash" => {
+                        if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                            commands.push(cmd.to_string());
+                        }
+                    }
+                    "read" | "write" | "edit" => {
+                        if let Some(p) = args.get("file_path").and_then(|f| f.as_str()) {
+                            touched_files.insert(clean_path(p, &cwd));
+                        } else if let Some(p) = args.get("filePath").and_then(|f| f.as_str()) {
+                            touched_files.insert(clean_path(p, &cwd));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        sessions.push(Session {
+            provider: "Mimocode".to_string(),
+            id: session_id,
+            cwd,
+            timestamp,
+            branch: None,
+            touched_files,
+            commands,
+            log_file_paths: vec![db_path.clone()],
+        });
+    }
 }
 
 fn scan_cursor(home: &Path, target_cwd: Option<&Path>, sessions: &mut Vec<Session>) {
